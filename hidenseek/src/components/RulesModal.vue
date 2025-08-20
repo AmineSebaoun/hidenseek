@@ -1,274 +1,245 @@
 <template>
-  <!-- On sort du flux normal : modal par-dessus la page -->
-  <Teleport to="body">
-    <div v-if="open" class="modal-root" @keydown.esc="$emit('close')" tabindex="-1">
-      <!-- Overlay sombre + flou (clique pour fermer) -->
-      <div class="overlay" @click="$emit('close')"></div>
-
-      <!-- Fenêtre centrée -->
-      <div class="panel" role="dialog" aria-modal="true" aria-labelledby="rules-title">
-        <div class="panel-header">
-          <h2 id="rules-title">Règles (frise chronologique)</h2>
-          <button class="btn tiny" @click="$emit('close')" aria-label="Fermer">✕</button>
+  <teleport to="body">
+    <div class="rules-modal" v-if="open">
+      <div class="overlay" @click="close()" />
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="Règles">
+        <div class="dialog-header">
+          <h2>Règles de la partie</h2>
+          <button class="btn btn-tiny" @click="close()">✕</button>
         </div>
 
-        <!-- Temps maximum (UI en minutes) -->
-        <div class="block">
-          <label class="label">Temps maximum (minutes, 0 = illimité)</label>
-          <input v-model.number="maxTimeMin" type="number" min="0" class="input" />
-          <p class="muted">Si &gt; 0, on ajoute/maj un événement <code>end</code> à ce temps.</p>
+        <div class="dialog-body">
+          <!-- Temps max -->
+          <section class="block">
+            <label class="label">
+              ⏱️ Temps maximum
+              <span class="hint">(minutes, 0 = illimité)</span>
+            </label>
+            <input
+              type="number"
+              min="0"
+              class="input w-140"
+              v-model.number="maxMinutes"
+            />
+          </section>
+
+          <!-- Formulaire d'ajout d'événement -->
+          <section class="block">
+            <h3 class="subtitle">➕ Ajouter un événement</h3>
+            <div class="add-row">
+              <input v-model.number="newTime" type="number" min="0" placeholder="Temps (s)" class="input w-120" />
+              <input v-model.number="newDuration" :disabled="newType==='end'" type="number" min="0" placeholder="Durée (s)" class="input w-120" />
+              <select v-model="newType" class="input">
+                <option v-for="b in rules.catalog" :key="b.key" :value="b.key">Bonus: {{ b.label }}</option>
+                <option value="end">Fin de partie</option>
+              </select>
+              <button class="btn" @click="applyEvent">Ajouter</button>
+            </div>
+            <p class="hint mt-6">
+              Astuce : la durée se met par défaut selon le bonus choisi.
+            </p>
+          </section>
+
+          <!-- Frise -->
+          <section class="block">
+            <h3 class="subtitle">🧭 Frise chronologique</h3>
+            <p v-if="!previewTimeline.length" class="hint">Aucun événement pour l’instant.</p>
+            <ul v-else class="timeline">
+              <li v-for="(ev, i) in previewTimeline" :key="ev.id || i" class="timeline-item">
+                <div class="time">{{ ev.time }}s</div>
+                <div class="what">{{ labelFor(ev.type) }}</div>
+                <div class="dur" v-if="ev.type !== 'end'">Durée: {{ ev.duration_sec }}s</div>
+                <button class="link danger" @click="onDelete(i, ev)">Supprimer</button>
+              </li>
+            </ul>
+          </section>
         </div>
 
-        <!-- Frise chronologique (style “cards”) -->
-        <div class="block">
-          <h3 class="subtitle">Frise chronologique</h3>
-
-          <div v-if="!sorted.length" class="muted">Aucun événement pour l’instant.</div>
-
-          <ul v-else class="timeline">
-            <li v-for="(r, i) in sorted" :key="i" class="tl-row">
-              <!-- colonne gauche : ligne + pastille -->
-              <div class="tl-col">
-                <div v-if="i>0" class="tl-line tl-top"></div>
-                <div v-if="i<sorted.length-1" class="tl-line tl-bottom"></div>
-                <span class="tl-dot" :class="dotClass(r.type)"></span>
-              </div>
-
-              <!-- carte -->
-              <article class="card">
-                <div class="time-badge" :class="badgeClass(r.type)">
-                  {{ minutesOf(r.time) }} min
-                </div>
-                <div class="card-body">
-                  <div class="card-title">{{ labels[r.type] || r.type }}</div>
-                </div>
-                <div class="card-actions">
-                  <button class="link danger" @click="remove(r, i)">Supprimer</button>
-                </div>
-              </article>
-            </li>
-          </ul>
-        </div>
-
-        <!-- Ajouter un événement -->
-        <div class="add-row">
-          <input v-model.number="newTimeMin" type="number" min="0" placeholder="Temps (min)" class="input" />
-          <select v-model="newType" class="input">
-            <option value="reveal">Révélation positions</option>
-            <option value="bonus">Bonus</option>
-            <option value="end">Fin de partie</option>
-          </select>
-          <button class="btn" @click="add">Ajouter</button>
-        </div>
-
-        <!-- Actions -->
-        <div class="footer">
-          <button class="btn ghost" @click="$emit('close')">Fermer</button>
-          <button class="btn primary" @click="save">Enregistrer</button>
+        <div class="dialog-footer">
+          <button class="btn btn-ghost" @click="close()">Fermer</button>
+          <button class="btn btn-primary" :disabled="rules.loading" @click="save()">Enregistrer</button>
         </div>
       </div>
     </div>
-  </Teleport>
+  </teleport>
 </template>
 
 <script setup>
-import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useRulesStore } from '@/stores/rules'
 
-const props = defineProps({ open: Boolean })
-const emit = defineEmits(['close'])
+const props = defineProps({ open: { type: Boolean, required: true } })
+const emit  = defineEmits(['close'])
 
-const rules = useRulesStore()
+const rules       = useRulesStore()
+const newTime     = ref(0)
+const newDuration = ref(30)
+const newType     = ref('end')
 
-// UI en minutes
-const maxTimeMin = ref(0)
-const newTimeMin = ref(0)
-const newType = ref('reveal')
+// Bloque le scroll du body
+function lockScroll (lock) { document.documentElement.style.overflow = lock ? 'hidden' : '' }
 
-// libellés
-const labels = {
-  reveal: 'Révélation positions',
-  bonus: 'Bonus',
-  end: 'Fin de partie'
-}
-
-// tri croissant par temps (sec)
-const sorted = computed(() =>
-  [...rules.rules].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-)
-
-// au moment d’ouvrir : on charge + on mappe l’event `end` en minutes
-watch(() => props.open, async (isOpen) => {
-  // scroll-lock
-  document.documentElement.style.overflow = isOpen ? 'hidden' : ''
-  if (!isOpen) return
-  await rules.fetchRules().catch(()=>{})
-  const end = rules.rules.find(r => r.type === 'end')
-  maxTimeMin.value = end ? Math.round((Number(end.time) || 0) / 60) : 0
+watch(() => props.open, async isOpen => {
+  lockScroll(isOpen)
+  if (isOpen) {
+    try {
+      await rules.fetchCatalog()
+      await rules.fetchRules()
+      // Valeurs par défaut du formulaire
+      newType.value = rules.catalog[0]?.key || 'end'
+      const def = rules.catalog.find(b => b.key === newType.value)?.default_duration_sec ?? 30
+      newDuration.value = def
+    } catch (e) {
+      console.error('Erreur rules/catalog', e)
+    }
+  }
 })
 
-// ESC fonctionne même sans focus sur un input
-onMounted(() => window.addEventListener('keydown', onEsc))
-onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onEsc)
-  document.documentElement.style.overflow = ''
+onBeforeUnmount(() => lockScroll(false))
+
+// ↔️ Champ minutes bi-directionnel pour éviter le bug "un seul chiffre"
+const maxMinutes = computed({
+  get: () => Math.floor((rules.game?.max_duration_sec || 0) / 60),
+  set: (m) => rules.setEnd(Math.max(0, Number(m || 0)) * 60),
 })
-function onEsc(e){ if (e.key === 'Escape' && props.open) emit('close') }
 
-// helpers
-function minutesOf(seconds){
-  return Math.round((Number(seconds || 0) / 60) * 10) / 10
-}
+// Met à jour la durée par défaut quand on change de type
+watch(newType, (k) => {
+  if (k === 'end') return (newDuration.value = 0)
+  const def = rules.catalog.find(b => b.key === k)?.default_duration_sec
+  if (typeof def === 'number') newDuration.value = def
+})
 
-// Ajouter
-function add(){
-  const minutes = Number(newTimeMin.value || 0)
-  if (minutes < 0) return
-  rules.addRule({ time: Math.round(minutes * 60), type: newType.value })
-  newTimeMin.value = 0
-  newType.value = 'reveal'
-}
-
-// Supprimer
-function remove(rule, idx){
-  rules.removeRule(idx)
-  if (rule.type === 'end') maxTimeMin.value = 0
-}
-
-// Enregistrer (gère l’event 'end' à partir de maxTimeMin)
-async function save(){
-  const endIdx = rules.rules.findIndex(r => r.type === 'end')
-  if (maxTimeMin.value > 0) {
-    const endEvt = { time: Math.round(Number(maxTimeMin.value) * 60), type: 'end' }
-    if (endIdx >= 0) rules.rules.splice(endIdx, 1, endEvt)
-    else rules.addRule(endEvt)
-  } else if (endIdx >= 0) {
-    rules.rules.splice(endIdx, 1)
+// Timeline d’aperçu (ajoute fin si pas posée manuellement mais max > 0)
+const previewTimeline = computed(() => {
+  const list = [...rules.timeline]
+  const hasManualEnd = list.some(ev => ev.type === 'end')
+  if (!hasManualEnd && rules.game?.max_duration_sec > 0) {
+    list.push({ time: rules.game.max_duration_sec, type: 'end', duration_sec: 0 })
   }
-  await rules.saveRules().catch(()=>{})
-  emit('close')
+  return list.sort((a, b) => a.time - b.time)
+})
+
+function labelFor (type) {
+  if (type === 'end') return 'Fin de partie'
+  const b = rules.catalog.find(x => x.key === type)
+  return b ? `Bonus: ${b.label}` : type
 }
 
-// styles dynamiques
-function dotClass(t){
-  switch (t) {
-    case 'reveal': return 'dot-purple'
-    case 'bonus':  return 'dot-green'
-    case 'end':    return 'dot-red'
-    default:       return 'dot-gray'
+// Vérifie si [t, t+d) chevauche un autre bonus existant
+function overlapsExisting(t, d) {
+  return rules.timeline.some(ev => {
+    if (ev.type === 'end') return false
+    const a1 = Number(ev.time) || 0
+    const a2 = a1 + (Number(ev.duration_sec) || 0)
+    const b1 = t
+    const b2 = t + d
+    return a1 < b2 && b1 < a2
+  })
+}
+
+function applyEvent () {
+  const t = Math.max(0, Number(newTime.value || 0))
+  const d = Math.max(0, Number(newDuration.value || 0))
+  const type = newType.value
+
+  // Interdiction après fin de partie si max défini
+  const endGame = Number(rules.game?.max_duration_sec || 0)
+  if (endGame > 0) {
+    if (type === 'end' && t !== endGame) {
+      alert(`La fin de partie est à ${endGame}s (définie par la durée max). Modifie la durée max si besoin.`)
+      return
+    }
+    if (type !== 'end' && t >= endGame) {
+      alert(`Impossible d'ajouter un bonus après la fin (${endGame}s).`)
+      return
+    }
+    if (type !== 'end' && t + d > endGame) {
+      alert(`Le bonus dépasse la fin de partie (${endGame}s). Raccourcis-le ou déplace-le.`)
+      return
+    }
+  }
+
+  // Pas de chevauchements
+  if (type !== 'end' && overlapsExisting(t, d)) {
+    alert('Ce bonus chevauche un autre bonus. Décale-le ou change sa durée.')
+    return
+  }
+
+  if (type === 'end') {
+    rules.setEnd(t)
+  } else {
+    rules.addEvent(type, t, d)
+  }
+
+  // Reset rapide
+  newTime.value = 0
+  const def = rules.catalog.find(b => b.key === newType.value)?.default_duration_sec ?? 30
+  newDuration.value = def
+}
+
+async function onDelete (index, ev) {
+  try {
+    if (ev.type === 'end') {
+      // supprime la fin
+      rules.setEnd(0)
+    } else {
+      await rules.removeEventAt(index) // appellera delete_bonus si l'item a un id
+    }
+  } catch (e) {
+    console.error('Suppression échouée', e)
+    alert("La suppression a échoué.")
   }
 }
-function badgeClass(t){
-  switch (t) {
-    case 'reveal': return 'badge-purple'
-    case 'bonus':  return 'badge-green'
-    case 'end':    return 'badge-red'
-    default:       return 'badge-gray'
+
+async function save () {
+  try {
+    await rules.saveRules({
+      maxDurationSec: rules.game?.max_duration_sec || 0,
+      scheduledStartTs: rules.game?.scheduled_start_ts || null,
+    })
+    close()
+  } catch (e) {
+    console.error('Erreur lors de la sauvegarde', e)
+    alert("La sauvegarde a échoué.")
   }
 }
+
+function close () { lockScroll(false); emit('close') }
 </script>
 
 <style scoped>
-/* ======================= */
-/* Layout & overlay modal  */
-/* ======================= */
-.modal-root{
-  position: fixed; inset: 0; z-index: 9999;
-  display: grid; place-items: center;
-}
-.overlay{
-  position: absolute; inset: 0;
-  background: rgba(0,0,0,.65);
-  backdrop-filter: blur(3px);
-}
-.panel{
-  position: relative;
-  width: min(920px, 95vw);
-  max-height: 90vh; overflow: auto;
-  background: #0f1115; color: #fff;
-  border-radius: 18px;
-  padding: 18px;
-  box-shadow: 0 24px 80px rgba(0,0,0,.55);
-  border: 1px solid rgba(255,255,255,.08);
-}
-.panel-header{
-  display:flex; align-items:center; justify-content:space-between;
-  margin-bottom: 10px;
-}
-.panel-header h2{ font-size: 22px; font-weight: 800; }
+.rules-modal { position: fixed; inset: 0; z-index: 9999; }
+.overlay { position:absolute; inset:0; background:rgba(0,0,0,.65); backdrop-filter: blur(4px); }
+.dialog { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:980px; max-width:95vw; max-height:92vh; overflow:auto; background:#0f1115; color:#fff;
+  border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.5); border:1px solid rgba(255,255,255,.08); }
+.dialog-header, .dialog-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; }
+.dialog-header h2 { margin:0; font-size:20px; font-weight:800; }
+.dialog-body { padding:0 18px 16px 18px; }
 
-.block{ margin: 14px 0 18px; }
-.subtitle{ margin: 0 0 10px; font-weight: 700; }
-.label{ display:block; margin-bottom:6px; }
+.block { margin:18px 0; }
+.label { display:block; margin-bottom:6px; font-weight:600; }
+.subtitle { margin:0 0 8px 0; font-weight:700; }
+.hint { opacity:.7; font-size:12px; }
+.mt-6 { margin-top:6px; }
 
-/* ======================= */
-/* Inputs & buttons        */
-/* ======================= */
-.input{
-  padding: 10px 12px; border-radius: 10px;
-  border: 1px solid #2b2f3a; background:#0b0e14; color:#eee;
-  width: 100%;
-}
-.btn{
-  padding: 10px 14px; border-radius: 10px; cursor:pointer;
-  border: 1px solid #3b3b3b; background:#1b1b1b; color:#eee;
-}
-.btn.primary{ background:#10b981; border-color:#10b981; color:#07130e; font-weight:700; }
-.btn.ghost{ background:transparent; }
-.btn.tiny{ padding:6px 10px; }
-.link{ cursor:pointer; border:none; background:transparent; color:#86c5ff; }
-.link.danger{ color:#ff8f8f; }
-.muted{ opacity:.7; font-size:12px; }
+.input { padding:10px 12px; border-radius:10px; border:1px solid #2b2f3a; background:#0b0e14; color:#eee; }
+.w-120 { width:120px; }
+.w-140 { width:140px; }
 
-/* ======================= */
-/* Timeline                */
-/* ======================= */
-.timeline{ position:relative; margin: 8px 0; padding-left: 44px; list-style:none; }
-.tl-row{ position:relative; display:grid; grid-template-columns: 32px 1fr; gap:12px; margin: 12px 0; }
-.tl-col{ position:relative; }
-.tl-line{
-  position:absolute; left: 50%; width:1px; background: rgba(255,255,255,.12);
-  transform:translateX(-50%);
-}
-.tl-top{ top:0; bottom:50%; }
-.tl-bottom{ top:50%; bottom:0; }
-.tl-dot{
-  position:absolute; top:50%; left:50%;
-  transform:translate(-50%, -50%);
-  width:10px; height:10px; border-radius:50%;
-  box-shadow: 0 0 0 4px #0f1115;
-}
-.dot-purple{ background:#8b5cf6; }
-.dot-green{ background:#10b981; }
-.dot-red{ background:#ef4444; }
-.dot-gray{ background:#94a3b8; }
+.btn { padding:10px 14px; border-radius:10px; border:1px solid #3b3b3b; background:#1b1b1b; color:#eee; cursor:pointer; }
+.btn-primary { background:#10b981; border-color:#10b981; color:#07130e; font-weight:700; }
+.btn-ghost { background:transparent; }
+.btn-tiny { padding:6px 10px; }
 
-/* Card */
-.card{
-  display:grid; grid-template-columns: 140px 1fr auto; align-items:center;
-  background:#141821; border-radius: 12px; overflow:hidden;
-  border: 1px solid rgba(255,255,255,.08);
-  box-shadow: 0 10px 30px rgba(0,0,0,.25);
-}
-.time-badge{
-  text-align:center; padding: 14px 10px; font-weight: 800; letter-spacing:.3px;
-  border-right: 1px solid transparent;
-}
-.badge-purple{ background: rgba(139,92,246,.18); border-right-color: rgba(139,92,246,.35); }
-.badge-green{ background: rgba(16,185,129,.18); border-right-color: rgba(16,185,129,.35); }
-.badge-red{ background: rgba(239,68,68,.20); border-right-color: rgba(239,68,68,.40); }
-.badge-gray{ background: rgba(148,163,184,.20); border-right-color: rgba(148,163,184,.35); }
-
-.card-body{ padding: 12px 14px; }
-.card-title{ font-size: 14px; font-weight: 700; }
-.card-actions{ padding: 12px; }
-
-.add-row{
-  display:grid; grid-template-columns: 1fr 1fr auto; gap:10px; margin: 12px 0 4px;
-}
-.footer{ display:flex; justify-content:flex-end; gap:10px; }
-@media (max-width: 640px){
-  .card{ grid-template-columns: 110px 1fr auto; }
-  .add-row{ grid-template-columns: 1fr; }
-}
+.timeline { list-style:none; margin:0; padding:0; }
+.timeline-item { display:grid; grid-template-columns:80px 1fr auto auto; align-items:center; gap:10px;
+  padding:8px 10px; border-radius:10px; background:#141821; border:1px solid rgba(255,255,255,.08); }
+.time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:800; color:#34d399; }
+.what { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dur { font-size:12px; opacity:.8; }
+.link { background:none; border:none; padding:0; color:#58a6ff; cursor:pointer; }
+.link.danger { color:#ff6b6b; }
+.add-row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
 </style>
