@@ -1,4 +1,3 @@
-<!-- src/views/Home.vue (ou src/pages/Home.vue selon ton arbo) -->
 <template>
   <div class="home">
     <h1 class="title">🎮 HideNSeek</h1>
@@ -59,19 +58,32 @@
       <p v-if="errorJoin" class="error">{{ errorJoin }}</p>
     </form>
 
-    <!-- LOBBY (affiché exactement où il était avant) -->
-    <Lobby v-if="isInLobby" />
+    <!-- LOBBY (au même endroit qu’avant) -->
+    <Lobby v-if="isInLobby" @open-rules="onOpenRules" />
+
+    <!-- Modale des règles -->
+    <RulesModal
+      :open="rulesOpen"
+      :token="session.token"
+      :game-id="session.game?.id"
+      @close="rulesOpen = false"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useGameStore } from '@/stores/game'
+import { useRulesStore } from '@/stores/rules'
 import Lobby from '@/components/Lobby.vue'
+import RulesModal from '@/components/RulesModal.vue'
 
+const router = useRouter()
 const session = useSessionStore()
 const game = useGameStore()
+const rules = useRulesStore()
 
 const mode = ref(null)
 const isInLobby = computed(() => !!session.game?.id)
@@ -88,6 +100,9 @@ const joinName = ref('')
 const loadingJoin = ref(false)
 const errorJoin = ref('')
 
+// modale règles
+const rulesOpen = ref(false)
+
 function copy(text){ if(text) navigator.clipboard?.writeText(text).catch(()=>{}) }
 function reset(){
   mode.value = null
@@ -99,7 +114,6 @@ function reset(){
   errorJoin.value = ''
 }
 
-/* Création + join */
 async function onCreateAndJoin () {
   errorCreate.value = ''
   loadingCreate.value = true
@@ -125,17 +139,24 @@ async function onJoin () {
   } finally { loadingJoin.value = false }
 }
 
-/* Si on est viré, le store émet un event → on revient au menu */
-const kickedHandled = ref(false)
-function onKicked(){
-  if (kickedHandled.value) return
-  kickedHandled.value = true
-  mode.value = null
+// ouverture modale règles depuis le lobby
+async function onOpenRules () {
+  rulesOpen.value = true
+  try { await rules.fetchCatalog() } catch {}
+  try { await rules.fetchRules() } catch {}
 }
-watch(() => game.kicked, (v) => { if (v) onKicked() })
-function kickedEvtHandler(){ onKicked() }
-onMounted(() => { window.addEventListener('hidenseek:kicked', kickedEvtHandler) })
-onBeforeUnmount(() => { window.removeEventListener('hidenseek:kicked', kickedEvtHandler) })
+
+// Si on recharge pendant une partie active → redirect
+onMounted(async () => {
+  try {
+    if (session.game?.id) {
+      const res = await game.getGame({ id: session.game.id })
+      if (res?.game?.state === 'active') {
+        router.push({ name: 'game' })
+      }
+    }
+  } catch {}
+})
 </script>
 
 <style scoped>
@@ -145,6 +166,7 @@ onBeforeUnmount(() => { window.removeEventListener('hidenseek:kicked', kickedEvt
 .banner { border:1px solid #2c2c2c; background:#0f1115; border-radius:10px; padding:10px 12px; margin-bottom:16px; }
 .banner-row { display:flex; align-items:center; gap:10px; }
 .muted { opacity:.7; font-size:12px; }
+
 .btn { padding:10px 14px; border-radius:8px; border:1px solid #3b3b3b; background:#1b1b1b; color:#eee; cursor:pointer; }
 .btn.primary { background:#10b981; border-color:#10b981; color:#07130e; font-weight:700; }
 .btn.ghost { background:transparent; }

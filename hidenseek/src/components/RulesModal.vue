@@ -1,3 +1,4 @@
+<!-- src/components/RulesModal.vue -->
 <template>
   <teleport to="body">
     <div class="rules-modal" v-if="open">
@@ -79,19 +80,24 @@ const newType     = ref('end')
 // Bloque le scroll du body
 function lockScroll (lock) { document.documentElement.style.overflow = lock ? 'hidden' : '' }
 
+// À l’ouverture : on charge, puis si l’API ne renvoie rien, on pré-remplit
 watch(() => props.open, async isOpen => {
   lockScroll(isOpen)
-  if (isOpen) {
-    try {
-      await rules.fetchCatalog()
-      await rules.fetchRules()
-      // Valeurs par défaut du formulaire
-      newType.value = rules.catalog[0]?.key || 'end'
-      const def = rules.catalog.find(b => b.key === newType.value)?.default_duration_sec ?? 30
-      newDuration.value = def
-    } catch (e) {
-      console.error('Erreur rules/catalog', e)
-    }
+  if (!isOpen) return
+  try {
+    await rules.fetchCatalog()
+    await rules.fetchRules()
+
+    // 🧠 Auto-préremplissage depuis la dernière frise locale
+    // UNIQUEMENT si l’API est vide (pas de durée max & pas d’événements)
+    rules.prefillFromLastIfEmpty()
+
+    // Valeurs par défaut du formulaire
+    newType.value = rules.catalog[0]?.key || 'end'
+    const def = rules.catalog.find(b => b.key === newType.value)?.default_duration_sec ?? 30
+    newDuration.value = def
+  } catch (e) {
+    console.error('Erreur rules/catalog', e)
   }
 })
 
@@ -181,10 +187,9 @@ function applyEvent () {
 async function onDelete (index, ev) {
   try {
     if (ev.type === 'end') {
-      // supprime la fin
       rules.setEnd(0)
     } else {
-      await rules.removeEventAt(index) // appellera delete_bonus si l'item a un id
+      await rules.removeEventAt(index)
     }
   } catch (e) {
     console.error('Suppression échouée', e)
