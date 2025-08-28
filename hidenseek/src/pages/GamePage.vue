@@ -1,4 +1,3 @@
-<>
 <template>
   <div>
     <!-- ===== HEADER ===== -->
@@ -193,6 +192,7 @@
                     <span class="sep">—</span>
                     reste {{ fmtMs(activeRemainingMs) }}
                   </div>
+                  <HnsMapHiders :pollMs="1500" :staleSec="300" />
                 </div>
               </template>
 
@@ -238,6 +238,7 @@
   import {useRulesStore} from '@/stores/rules'
   import {useTimeStore} from '@/stores/time'
   import {useMessageStore} from '@/stores/message'
+  import HnsMapHiders from "@/components/bonuses/HnsMapHiders.vue";
 
   /* =========================
      CONFIG / HELPERS
@@ -263,11 +264,20 @@
   const startedAtMs = ref(null)
   const maxTotalMs = ref(0)
   const playersCount = ref(0)
+  const playersLive = ref([])
   const nowMs = ref(0)
 
   /* Rôles */
   const isHider = computed(() => session.player?.role === 'hider')
   const isSeeker = computed(() => session.player?.role === 'seeker')
+
+  // ====== GEO ======
+  const geoWatchId     = ref(null)
+  const myPos          = ref({ lat:null, lng:null, acc:null, bearing:null, at:0 })
+  let   lastPushMs     = 0
+  const MIN_PUSH_MS    = 3000     // envoie au serveur au max toutes les 3s
+  const GEO_MAX_AGE_MS = 8000     // garde la pos quelques secondes
+  const GEO_TIMEOUT_MS = 10000
 
   /* Onglets */
   const tabs = [
@@ -317,7 +327,6 @@
     }
     rafId = requestAnimationFrame(rafTick)
   }
-
   /* =========================
      CHAT (UI)
      ========================= */
@@ -406,6 +415,47 @@
     } finally {
       sending.value = false
     }
+  }
+
+  function startGeoWatch(){
+    if (!('geolocation' in navigator)) return
+    if (geoWatchId.value != null) return
+
+    const opts = { enableHighAccuracy: true, maximumAge: GEO_MAX_AGE_MS, timeout: GEO_TIMEOUT_MS }
+    geoWatchId.value = navigator.geolocation.watchPosition(onGeoOk, onGeoErr, opts)
+    // premier fix "immédiat" si possible
+    navigator.geolocation.getCurrentPosition(onGeoOk, ()=>{}, opts)
+  }
+
+  function stopGeoWatch(){
+    try {
+      if (geoWatchId.value != null) navigator.geolocation.clearWatch(geoWatchId.value)
+    } catch {}
+    geoWatchId.value = null
+  }
+
+  async function onGeoOk(pos){
+    const c = pos.coords || {}
+    const lat = Number(c.latitude)
+    const lng = Number(c.longitude)
+    const acc = c.accuracy != null ? Number(c.accuracy) : null
+    const bearing = c.heading != null && !Number.isNaN(c.heading) ? Math.round(c.heading) : null
+    const ts = Math.floor((pos.timestamp || Date.now())/1000)
+
+    myPos.value = { lat, lng, acc, bearing, at: ts }
+
+    // throttle des push serveur
+    const now = Date.now()
+    if (now - lastPushMs >= MIN_PUSH_MS) {
+      lastPushMs = now
+      game.updateLocation({ lat, lng, acc, bearing })
+        .catch(()=>{}) // on ignore l’erreur réseau ponctuelle
+    }
+  }
+
+  function onGeoErr(err){
+    // silencieux, mais tu peux logger pour debug
+    // console.warn('geo error', err)
   }
 
   /* =========================
@@ -842,19 +892,21 @@
     }
   }
 
-  async function refreshPlayers() {
+  async function refreshPlayers(){
     if (leaving.value || goingHome.value) return
     try {
-      const {players} = await game.getPlayers()
+      const { players } = await game.getPlayers()
       playersCount.value = players?.length || 0
+      playersLive.value  = players || []
+
+      // synchro du rôle depuis l'API
       syncMyRole(players)
-      if (playersCount.value < 3) await quit({
-        silent: true,
-        keepAuth: true,
-        reason: 'Partie terminée (moins de 3 joueurs).'
-      })
+
+      if (playersCount.value < 3) {
+        await quit({ silent:true, keepAuth:true, reason:'Partie terminée (moins de 3 joueurs).' })
+      }
     } catch {
-      await quit({silent: true, keepAuth: true})
+      await quit({ silent:true, keepAuth:true })
     }
   }
 
@@ -893,6 +945,7 @@
     }
     stopMessageLoop()
     stopCamera()
+    stopGeoWatch()
     for (const [, tid] of timersBySid.value) clearTimeout(tid)
     timersBySid.value.clear()
   }
@@ -956,6 +1009,8 @@
 
   async function init() {
     ready.value = false
+    try { startGeoWatch() } catch {}
+
     if (!ensureInGame()) {
       await goLobbyOnce();
       return

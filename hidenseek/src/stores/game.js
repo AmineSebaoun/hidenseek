@@ -57,6 +57,7 @@ export const useGameStore = defineStore('game', () => {
     return data // { player, token, game }
   }
 
+  // ➜ récupère aussi la dernière position connue (loc_*)
   async function getPlayers() {
     const res = await axios.post(
       API,
@@ -65,7 +66,23 @@ export const useGameStore = defineStore('game', () => {
     )
     const data = parseMaybeJSON(res.data)
     if (res.status !== 200) throw new Error(data?.error || `get_players_http_${res.status}`)
-    return data // { players: [...] }
+
+    const players = (data.players || []).map(p => ({
+      id: p.id,
+      name: p.name,
+      role: p.role,
+      team: p.team,
+      last_seen: Number(p.last_seen || 0),
+      loc: {
+        lat: p.loc_lat != null ? Number(p.loc_lat) : null,
+        lng: p.loc_lng != null ? Number(p.loc_lng) : null,
+        acc: p.loc_acc != null ? Number(p.loc_acc) : null,
+        bearing: p.loc_bearing != null ? Number(p.loc_bearing) : null,
+        at: p.loc_at != null ? Number(p.loc_at) : null,
+      },
+    }))
+
+    return { players }
   }
 
   async function setRole(playerId, role) {
@@ -115,18 +132,40 @@ export const useGameStore = defineStore('game', () => {
     return data // { ok:true, started_at }
   }
 
-  // Programmer un départ server-side à "now + delaySeconds"
-  async function scheduleStart(delaySeconds = 5) {
-    const now = Math.floor(time.nowServerMs() / 1000)
-    const ts = now + Math.max(0, Number(delaySeconds) || 0)
-    const res = await axios.post(
-      API,
-      { action: 'set_rules', scheduled_start_ts: ts }, // on ne touche à rien d’autre
-      { headers: headers(), validateStatus: s => s < 500 }
-    )
-    const data = parseMaybeJSON(res.data)
-    if (res.status !== 200) throw new Error(data?.error || `schedule_start_http_${res.status}`)
-    return { scheduled_start_ts: ts }
+  /**
+   * Programme un départ : on tente d’abord /schedule_start (avec validations),
+   * sinon fallback legacy via set_rules.scheduled_start_ts.
+   */
+  async function scheduleStart(countdownSec = 3) {
+    const tryNew = async () => {
+      const res = await axios.post(
+        API,
+        { action: 'schedule_start', countdown_sec: Math.max(1, Number(countdownSec) || 3) },
+        { headers: headers(), validateStatus: s => s < 500 }
+      )
+      const data = parseMaybeJSON(res.data)
+      if (res.status !== 200) throw Object.assign(new Error(data?.error || `schedule_start_http_${res.status}`), { data, status: res.status })
+      return { scheduled_start_ts: data.scheduled_start_ts, countdown_sec: data.countdown_sec }
+    }
+    const tryLegacy = async () => {
+      const now = Math.floor((time?.nowServerMs?.() ?? Date.now()) / 1000)
+      const ts  = now + Math.max(1, Number(countdownSec) || 3)
+      const res = await axios.post(
+        API,
+        { action: 'set_rules', scheduled_start_ts: ts },
+        { headers: headers(), validateStatus: s => s < 500 }
+      )
+      const data = parseMaybeJSON(res.data)
+      if (res.status !== 200) throw new Error(data?.error || `schedule_start_legacy_http_${res.status}`)
+      return { scheduled_start_ts: ts, countdown_sec: countdownSec }
+    }
+
+    try {
+      return await tryNew()
+    } catch (e) {
+      // fallback silencieux si non-host/endpoint absent
+      return await tryLegacy()
+    }
   }
 
   // Quitter / expulser
@@ -144,10 +183,43 @@ export const useGameStore = defineStore('game', () => {
   async function leaveGame() { return removePlayer(null) }
 
   // ======================================================
+  //  GEO — update + helpers
+  // ======================================================
+  async function updateLocation({ lat, lng, acc=null, bearing=null }) {
+    const res = await axios.post(API, {
+      action: 'update_location',
+      lat: Number(lat), lng: Number(lng),
+      accuracy: acc != null ? Number(acc) : null,
+      bearing:  bearing != null ? Number(bearing) : null,
+    }, { headers: headers(), validateStatus: s => s < 500 })
+    const data = parseMaybeJSON(res.data)
+    if (res.status !== 200) throw new Error(data?.error || 'update_location_failed')
+    return data
+  }
+
+  async function getLocations() {
+    const res = await axios.post(API, { action: 'get_locations' },
+      { headers: headers(), validateStatus: s => s < 500 })
+    const data = parseMaybeJSON(res.data)
+    if (res.status !== 200) throw new Error(data?.error || 'get_locations_failed')
+    return data // {server_time, me, players:[...]}
+  }
+
+  function haversine(a, b) {
+    const R = 6371000
+    const toRad = d => d * Math.PI / 180
+    const dLat = toRad((b.lat ?? 0) - (a.lat ?? 0))
+    const dLng = toRad((b.lng ?? 0) - (a.lng ?? 0))
+    const la1 = toRad(a.lat ?? 0), la2 = toRad(b.lat ?? 0)
+    const x = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)**2
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)))
+  }
+
+  // ======================================================
   //  BONUS — planning local + synchro déclenchement
   // ======================================================
 
-  let plannedBonuses = []        // non-reactif
+  let plannedBonuses = []        // non-réactif
   const claimedKeys = new Set()  // persistant localement (par game)
   let startedAtMs = null
 
@@ -174,13 +246,13 @@ export const useGameStore = defineStore('game', () => {
     _loadClaimedFromStorage()
   }
 
-  function getNextBonus(nowMs = time.nowServerMs()) {
+  function getNextBonus(nowMs = time.nowServerMs?.() ?? Date.now()) {
     const next = plannedBonuses.find(b => !claimedKeys.has(b.key) && b.atMs > nowMs)
     if (!next) return { bonus: null, msUntil: -1 }
     return { bonus: next, msUntil: next.atMs - nowMs }
   }
 
-  function getClaimableBonus(nowMs = time.nowServerMs()) {
+  function getClaimableBonus(nowMs = time.nowServerMs?.() ?? Date.now()) {
     return plannedBonuses.find(b => !claimedKeys.has(b.key) && b.atMs <= nowMs) || null
   }
 
@@ -247,11 +319,15 @@ export const useGameStore = defineStore('game', () => {
     getGame, startGame, scheduleStart,
     removePlayer, leaveGame, leaveAndReset,
 
+    // geo
+    updateLocation, haversine,
+
     // bonus/public API
     initBonusesFromRules,
     getNextBonus,
     getClaimableBonus,
     claimBonus,
+    getLocations,
     syncTriggeredFromServer,
     allPlannedBonuses,
     claimedList,
